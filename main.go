@@ -54,7 +54,7 @@ var (
 
 	cam rl.Camera2D
 
-	map_file    = "resource/maps/test.map"
+	map_file    = "resource/maps/second.map"
 	map_hotswap = true
 )
 
