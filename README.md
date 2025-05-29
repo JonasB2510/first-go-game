@@ -1,4 +1,4 @@
 # first-go-game
 
-assets from:
+# assets from:
 # https://cupnooble.itch.io/sprout-lands-asset-pack
