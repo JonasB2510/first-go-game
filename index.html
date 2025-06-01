@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>WebSocket Game Controller</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+    }
+    .connection-settings {
+      margin-bottom: 15px;
+    }
+    .connection-settings label {
+      display: inline-block;
+      width: 150px;
+      font-weight: bold;
+    }
+    .connection-settings input {
+      border: 1px solid #ccc;
+      border-radius: 3px;
+    }
+    button { 
+      margin: 5px; 
+      padding: 10px 15px;
+      font-size: 16px;
+      border: 2px solid #333;
+      background: #f0f0f0;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #e0e0e0;
+    }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    .status {
+      margin: 10px 0;
+      padding: 10px;
+      border-radius: 5px;
+      font-weight: bold;
+    }
+    .status.connected {
+      background: #d4edda;
+      color: #155724;
+      border: 1px solid #c3e6cb;
+    }
+    .status.disconnected {
+      background: #f8d7da;
+      color: #721c24;
+      border: 1px solid #f5c6cb;
+    }
+    .status.spawned {
+      background: #d1ecf1;
+      color: #0c5460;
+      border: 1px solid #bee5eb;
+    }
+    .controls {
+      margin-top: 20px;
+    }
+    .movement-grid {
+      display: inline-block;
+      text-align: center;
+    }
+    .movement-row {
+      margin: 5px 0;
+    }
+    .instructions {
+      margin-top: 20px;
+      padding: 15px;
+      background: #e9ecef;
+      border-radius: 5px;
+    }
+  </style>
+</head>
+<body>
+  <h1>WebSocket Steuerung</h1>
+
+  <div class="connection-settings">
+    <label for="wsUrl">WebSocket URL:</label>
+    <input type="text" id="wsUrl" value="ws://localhost:8080/ws" placeholder="ws://localhost:8080/ws" style="width: 300px; padding: 8px; margin: 5px;">
+  </div>
+
+  <div id="status" class="status disconnected">Nicht verbunden</div>
+
+  <button id="connectBtn" onclick="connect()">Verbinden</button>
+  <button id="disconnectBtn" onclick="disconnect()" disabled>Trennen</button>
+  <button id="respawnBtn" onclick="respawn()" disabled>Respawn</button>
+  <button id="getPlayersBtn" onclick="getPlayers()" disabled>Spieler abrufen</button>
+
+  <div class="controls">
+    <div class="movement-grid">
+      <div class="movement-row">
+        <button id="upBtn" onclick="move('Up')" disabled>⬆ Hoch (W)</button>
+      </div>
+      <div class="movement-row">
+        <button id="leftBtn" onclick="move('Left')" disabled>⬅ Links (A)</button>
+        <button id="downBtn" onclick="move('Down')" disabled>⬇ Runter (S)</button>
+        <button id="rightBtn" onclick="move('Right')" disabled>➡ Rechts (D)</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="instructions">
+    <h3>Steuerung:</h3>
+    <p><strong>Maus:</strong> Nutze die Pfeiltasten-Buttons</p>
+    <p><strong>Tastatur:</strong> W (Hoch), A (Links), S (Runter), D (Rechts)</p>
+    <p><strong>Ablauf:</strong> URL eingeben → "Verbinden" → dann "Respawn" → dann Bewegung möglich</p>
+  </div>
+
+  <div id="playersInfo" style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 5px; display: none;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+      <h3 style="margin: 0;">Aktuelle Spieler:</h3>
+      <div>
+        <label>
+          <input type="checkbox" id="autoUpdateToggle" checked> Auto-Update (1s)
+        </label>
+        <span id="updateStatus" style="margin-left: 10px; font-size: 12px; color: #666;"></span>
+      </div>
+    </div>
+    <div id="gameGrid" style="position: relative; width: 800px; height: 600px; border: 2px solid #333; background: #f0f8ff; margin: 10px 0;"></div>
+    <div id="playersList"></div>
+  </div>
+
+  <script>
+    let ws = null;
+    let isConnected = false;
+    let isSpawned = false; // Tracks if player has successfully spawned
+    let autoUpdateInterval = null; // Auto-update timer
+
+    // UI Elemente
+    const statusDiv = document.getElementById('status');
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    const respawnBtn = document.getElementById('respawnBtn');
+    const getPlayersBtn = document.getElementById('getPlayersBtn');
+    const wsUrlInput = document.getElementById('wsUrl');
+    const playersInfo = document.getElementById('playersInfo');
+    const playersList = document.getElementById('playersList');
+    const gameGrid = document.getElementById('gameGrid');
+    const autoUpdateToggle = document.getElementById('autoUpdateToggle');
+    const updateStatus = document.getElementById('updateStatus');
+    const movementButtons = ['upBtn', 'leftBtn', 'downBtn', 'rightBtn'];
+
+    // Get Players - MOVED OUTSIDE updateUI()
+    function getPlayers() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        console.log("Nicht verbunden - kann keine Spielerdaten abrufen");
+        return;
+      }
+
+      console.log("Sende get_players-Anfrage");
+      ws.send(JSON.stringify({ command: "get_players" }));
+      updateStatus.textContent = "Aktualisiert: " + new Date().toLocaleTimeString();
+    }
+
+    // Start/Stop auto-update
+    function toggleAutoUpdate() {
+      if (autoUpdateToggle.checked && isConnected) {
+        startAutoUpdate();
+      } else {
+        stopAutoUpdate();
+      }
+    }
+
+    function startAutoUpdate() {
+      if (autoUpdateInterval) return; // Already running
+      
+      autoUpdateInterval = setInterval(() => {
+        if (isConnected && autoUpdateToggle.checked) {
+          getPlayers();
+        } else {
+          stopAutoUpdate();
+        }
+      }, 50); // Update every second
+      
+      // Initial load
+      getPlayers();
+      console.log("Auto-update gestartet");
+    }
+
+    function stopAutoUpdate() {
+      if (autoUpdateInterval) {
+        clearInterval(autoUpdateInterval);
+        autoUpdateInterval = null;
+        console.log("Auto-update gestoppt");
+      }
+    }
+
+    // Handle players data response - MOVED OUTSIDE updateUI()
+    function handlePlayersData(playersData) {
+      console.log("Spielerdaten erhalten:", playersData);
+      
+      // Clear previous grid content
+      gameGrid.innerHTML = '';
+      playersList.innerHTML = '';
+      
+      // Check if we have player data
+      const playerCount = Object.keys(playersData).length;
+      if (playerCount === 0) {
+        gameGrid.innerHTML = '<div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 18px; color: #666;">Keine Spieler online</div>';
+        playersList.innerHTML = '<p>Keine Spieler online</p>';
+      } else {
+        // Draw players on grid
+        drawPlayersOnGrid(playersData);
+        
+        // Create table for detailed info
+        let tableHTML = `
+          <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+            <thead>
+              <tr style="background: #e9ecef;">
+                <th style="border: 1px solid #ccc; padding: 8px; text-align: left;">Spieler ID</th>
+                <th style="border: 1px solid #ccc; padding: 8px; text-align: left;">Position (X, Y)</th>
+                <th style="border: 1px solid #ccc; padding: 8px; text-align: left;">Größe (W×H)</th>
+                <th style="border: 1px solid #ccc; padding: 8px; text-align: left;">Sprite (X, Y, W×H)</th>
+              </tr>
+            </thead>
+            <tbody>
+        `;
+        
+        // Add each player to the table
+        for (const [playerId, playerInfo] of Object.entries(playersData)) {
+          const dest = playerInfo.playerDest;
+          const src = playerInfo.playerSrc;
+          
+          tableHTML += `
+            <tr>
+              <td style="border: 1px solid #ccc; padding: 8px; font-family: monospace;">${playerId}</td>
+              <td style="border: 1px solid #ccc; padding: 8px;">${dest.X}, ${dest.Y}</td>
+              <td style="border: 1px solid #ccc; padding: 8px;">${dest.Width}×${dest.Height}</td>
+              <td style="border: 1px solid #ccc; padding: 8px;">${src.X}, ${src.Y}, ${src.Width}×${src.Height}</td>
+            </tr>
+          `;
+        }
+        
+        tableHTML += `
+            </tbody>
+          </table>
+          <p style="margin-top: 10px; font-size: 14px; color: #666;">
+            Insgesamt ${playerCount} Spieler online
+          </p>
+        `;
+        
+        playersList.innerHTML = tableHTML;
+      }
+      
+      // Show the players info section
+      playersInfo.style.display = 'block';
+    }
+
+    // Draw players on visual grid
+    function drawPlayersOnGrid(playersData) {
+      const gridWidth = 800;
+      const gridHeight = 600;
+      
+      // Generate colors for different players
+      const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#ffeaa7', '#dda0dd', '#98d8c8', '#f7dc6f'];
+      let colorIndex = 0;
+      
+      for (const [playerId, playerInfo] of Object.entries(playersData)) {
+        const dest = playerInfo.playerDest;
+        
+        // Scale player position to fit our grid (assuming game world is larger)
+        // You may need to adjust these scaling factors based on your game's coordinate system
+        const scaleX = gridWidth / 1000; // Adjust 1000 to your game world width
+        const scaleY = gridHeight / 1000; // Adjust 1000 to your game world height
+        
+        const playerElement = document.createElement('div');
+        playerElement.style.position = 'absolute';
+        playerElement.style.left = (dest.X * scaleX) + 'px';
+        playerElement.style.top = (dest.Y * scaleY) + 'px';
+        playerElement.style.width = Math.max(dest.Width * scaleX, 10) + 'px'; // Minimum 10px width
+        playerElement.style.height = Math.max(dest.Height * scaleY, 10) + 'px'; // Minimum 10px height
+        playerElement.style.backgroundColor = colors[colorIndex % colors.length];
+        playerElement.style.border = '2px solid #333';
+        playerElement.style.borderRadius = '3px';
+        playerElement.style.display = 'flex';
+        playerElement.style.alignItems = 'center';
+        playerElement.style.justifyContent = 'center';
+        playerElement.style.fontSize = '10px';
+        playerElement.style.fontWeight = 'bold';
+        playerElement.style.color = '#fff';
+        playerElement.style.textShadow = '1px 1px 1px rgba(0,0,0,0.5)';
+        playerElement.style.overflow = 'hidden';
+        playerElement.style.transition = 'all 0.2s ease';
+        
+        // Add player ID as text (shortened)
+        const shortId = playerId.length > 8 ? playerId.substring(0, 8) + '...' : playerId;
+        playerElement.textContent = shortId;
+        
+        // Add tooltip with full info
+        playerElement.title = `Player: ${playerId}\nPosition: ${dest.X}, ${dest.Y}\nSize: ${dest.Width}×${dest.Height}`;
+        
+        gameGrid.appendChild(playerElement);
+        colorIndex++;
+      }
+      
+      // Add grid lines for better visualization
+      addGridLines();
+    }
+
+    // Add grid lines to help visualize the space
+    function addGridLines() {
+      const gridWidth = 800;
+      const gridHeight = 600;
+      const gridSize = 50; // Grid cell size
+      
+      // Vertical lines
+      for (let x = 0; x <= gridWidth; x += gridSize) {
+        const line = document.createElement('div');
+        line.style.position = 'absolute';
+        line.style.left = x + 'px';
+        line.style.top = '0px';
+        line.style.width = '1px';
+        line.style.height = gridHeight + 'px';
+        line.style.backgroundColor = 'rgba(200, 200, 200, 0.3)';
+        line.style.pointerEvents = 'none';
+        gameGrid.appendChild(line);
+      }
+      
+      // Horizontal lines
+      for (let y = 0; y <= gridHeight; y += gridSize) {
+        const line = document.createElement('div');
+        line.style.position = 'absolute';
+        line.style.left = '0px';
+        line.style.top = y + 'px';
+        line.style.width = gridWidth + 'px';
+        line.style.height = '1px';
+        line.style.backgroundColor = 'rgba(200, 200, 200, 0.3)';
+        line.style.pointerEvents = 'none';
+        gameGrid.appendChild(line);
+      }
+    }
+
+    // Status UI aktualisieren
+    function updateUI() {
+      if (isConnected) {
+        if (isSpawned) {
+          statusDiv.textContent = 'Verbunden - Spawned (Bereit zum Spielen)';
+          statusDiv.className = 'status spawned';
+        } else {
+          statusDiv.textContent = 'Verbunden - Bereit für Respawn';
+          statusDiv.className = 'status connected';
+        }
+        
+        connectBtn.disabled = true;
+        disconnectBtn.disabled = false;
+        respawnBtn.disabled = false;
+        getPlayersBtn.disabled = false;
+        wsUrlInput.disabled = true; // URL-Eingabe während Verbindung deaktivieren
+        
+        // Start auto-update if enabled
+        if (autoUpdateToggle.checked) {
+          startAutoUpdate();
+        }
+        
+        // Bewegungsbuttons nur aktivieren wenn gespawned
+        movementButtons.forEach(btnId => {
+          document.getElementById(btnId).disabled = !isSpawned;
+        });
+      } else {
+        statusDiv.textContent = 'Nicht verbunden';
+        statusDiv.className = 'status disconnected';
+        connectBtn.disabled = false;
+        disconnectBtn.disabled = true;
+        respawnBtn.disabled = true;
+        getPlayersBtn.disabled = true;
+        wsUrlInput.disabled = false; // URL-Eingabe wieder aktivieren
+        
+        // Stop auto-update
+        stopAutoUpdate();
+        
+        // Alle Bewegungsbuttons deaktivieren
+        movementButtons.forEach(btnId => {
+          document.getElementById(btnId).disabled = true;
+        });
+      }
+    }
+
+    // WebSocket Verbindung herstellen
+    function connect() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        console.log("Bereits verbunden");
+        return;
+      }
+
+      const wsUrl = document.getElementById('wsUrl').value.trim();
+      if (!wsUrl) {
+        alert("Bitte gib eine WebSocket URL ein!");
+        return;
+      }
+
+      // Validierung der URL
+      try {
+        new URL(wsUrl);
+        if (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://')) {
+          throw new Error('URL muss mit ws:// oder wss:// beginnen');
+        }
+      } catch (e) {
+        alert("Ungültige WebSocket URL! Beispiel: ws://localhost:8080/ws");
+        return;
+      }
+
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log("WebSocket verbunden");
+        isConnected = true;
+        isSpawned = false; // Reset spawn status on new connection
+        updateUI();
+      };
+
+      ws.onmessage = (event) => {
+        console.log("Nachricht erhalten:", event.data);
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Check if it's a successful spawn response
+          if (typeof data == "number") {
+            isSpawned = true;
+            console.log("Erfolgreich gespawned");
+            updateUI();
+          }
+          // Handle other possible responses
+          else if (data === false || data === "false") {
+            console.log("Spawn fehlgeschlagen");
+            isSpawned = false;
+            updateUI();
+          }
+          // Handle get_players response
+          else if (typeof data === 'object' && data !== null) {
+            handlePlayersData(data);
+          }
+        } catch (e) {
+          // Handle non-JSON messages
+          const message = event.data.toString().toLowerCase();
+          if (message === "true") {
+            isSpawned = true;
+            console.log("Erfolgreich gespawned");
+            updateUI();
+          } else if (message === "false") {
+            console.log("Spawn fehlgeschlagen");
+            isSpawned = false;
+            updateUI();
+          } else {
+            console.log("Unbekannte Nachricht:", event.data);
+          }
+        }
+      };
+
+      ws.onclose = () => {
+        console.log("WebSocket getrennt");
+        isConnected = false;
+        isSpawned = false;
+        stopAutoUpdate(); // Stop auto-update on disconnect
+        updateUI();
+      };
+
+      ws.onerror = (error) => {
+        console.error("WebSocket Fehler:", error);
+        isConnected = false;
+        isSpawned = false;
+        stopAutoUpdate(); // Stop auto-update on error
+        updateUI();
+      };
+    }
+
+    // WebSocket Verbindung trennen
+    function disconnect() {
+      if (ws) {
+        ws.close();
+        ws = null;
+        isConnected = false;
+        isSpawned = false;
+        stopAutoUpdate(); // Stop auto-update on manual disconnect
+        updateUI();
+      }
+    }
+
+    // Respawn
+    function respawn() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert("Nicht verbunden! Bitte zuerst verbinden.");
+        return;
+      }
+
+      console.log("Sende Respawn-Anfrage");
+      ws.send(JSON.stringify({ command: "respawn", respawn: "true" }));
+    }
+
+    // Bewegung
+    function move(direction) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert("Nicht verbunden!");
+        return;
+      }
+
+      if (!isSpawned) {
+        alert("Bitte zuerst respawnen!");
+        return;
+      }
+
+      const moveData = {
+        command: "player_data",
+        playerUp: "false",
+        playerLeft: "false",
+        playerDown: "false",
+        playerRight: "false"
+      };
+
+      // Nur eine Richtung auf "true" setzen
+      moveData["player" + direction] = "true";
+
+      console.log("Sende Bewegung:", JSON.stringify(moveData));
+      ws.send(JSON.stringify(moveData));
+    }
+
+    // WASD Tastatur-Steuerung
+    document.addEventListener('keydown', (event) => {
+      // Nur wenn Bewegung möglich ist
+      if (!isConnected || !isSpawned) return;
+
+      switch(event.key.toLowerCase()) {
+        case 'w':
+          event.preventDefault();
+          move('Up');
+          break;
+        case 'a':
+          event.preventDefault();
+          move('Left');
+          break;
+        case 's':
+          event.preventDefault();
+          move('Down');
+          break;
+        case 'd':
+          event.preventDefault();
+          move('Right');
+          break;
+      }
+    });
+
+    // Initial UI aktualisieren
+    updateUI();
+
+    // Event listener for auto-update toggle
+    autoUpdateToggle.addEventListener('change', toggleAutoUpdate);
+  </script>
+</body>
+</html>
