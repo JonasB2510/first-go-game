@@ -489,6 +489,25 @@ func startServer(port string) {
 			log.Printf("Player %d disconnected and removed", playerID)
 		}
 	})
+	file := "index.html"
+
+	if _, err := os.Stat(file); err == nil {
+		// Datei existiert – einlesen
+		inhalt, err := os.ReadFile(file)
+		if err != nil {
+			fmt.Println("Fehler beim Lesen:", err)
+			return
+		}
+		//fmt.Println("Dateiinhalt:", string(inhalt))
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			//fmt.Fprint(w, []byte(inhalt))
+			w.Write([]byte(inhalt))
+		})
+	} else if os.IsNotExist(err) {
+		fmt.Println("Datei existiert nicht.")
+	} else {
+		fmt.Println("Fehler beim Prüfen der Datei:", err)
+	}
 
 	fmt.Println("Server running on http://localhost:" + port)
 	err := http.ListenAndServe(":"+port, nil)
