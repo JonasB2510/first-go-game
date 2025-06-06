@@ -56,6 +56,7 @@ var (
 	srcMap     []string
 	mapW, mapH int
 	map_file   = "resource/maps/second.map"
+	loadedMap  []string
 
 	// Audio
 	musicPaused bool
@@ -74,6 +75,7 @@ var (
 	joinedPlayers    = make(map[int]map[string]rl.Rectangle)
 	joinPlayerID     int
 	lastPlayerUpdate time.Time
+	lastMapUpdate    time.Time
 )
 
 type MovementData struct {
@@ -233,6 +235,12 @@ func update() {
 	requestPlayerPositionsWS()
 	//	lastPlayerUpdate = time.Now()
 	//}
+	if time.Since(lastMapUpdate) > 10000*time.Millisecond {
+		requestMapDataWS()
+		time.Sleep(1 * time.Second)
+		loadMap()
+		lastMapUpdate = time.Now()
+	}
 
 	frameCount++
 	playerSrc.Y = playerSrc.Height
@@ -275,17 +283,23 @@ func render() {
 	rl.EndDrawing()
 }
 
-func loadMap(mapFile string) {
+func loadMap() {
 	tileMap = tileMap[:0]
 	srcMap = srcMap[:0]
 
-	file, err := os.ReadFile(mapFile)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+	if host_type == "host" {
+		file, err := os.ReadFile(map_file)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		remNewLines := strings.Replace(string(file), "\n", " ", -1)
+		loadedMap = strings.Fields(remNewLines)
+	} else if host_type == "join" {
+		requestMapDataWS()
+		//fmt.Println(loadedMap)
 	}
-	remNewLines := strings.Replace(string(file), "\n", " ", -1)
-	sliced := strings.Fields(remNewLines)
+	sliced := loadedMap
 
 	mapW = -1
 	mapH = -1
@@ -340,8 +354,20 @@ func handleWebSocketMessages() {
 		// Try to parse as JSON first
 		var response map[string]interface{}
 		if err := json.Unmarshal(message, &response); err == nil {
-			// Handle JSON responses (player positions)
-			handlePlayerPositionsResponse(message)
+			// Check message type to handle different JSON responses
+			if msgType, exists := response["type"]; exists {
+				switch msgType {
+				case "player_positions":
+					handlePlayerPositionsResponse(message)
+				case "map_data":
+					handleMapDataResponse(message)
+				default:
+					log.Printf("Unknown JSON message type: %v", msgType)
+				}
+			} else {
+				// Fallback to original handling if no type field
+				handlePlayerPositionsResponse(message)
+			}
 		} else {
 			// Handle simple string responses
 			messageStr := string(message)
@@ -356,8 +382,12 @@ func handleWebSocketMessages() {
 }
 
 func handlePlayerPositionsResponse(message []byte) {
-	var receivedPlayers map[int]map[string]rl.Rectangle
-	if err := json.Unmarshal(message, &receivedPlayers); err != nil {
+	var response struct {
+		Type    string                          `json:"type"`
+		Players map[int]map[string]rl.Rectangle `json:"players"`
+	}
+
+	if err := json.Unmarshal(message, &response); err != nil {
 		log.Println("Error parsing player positions:", err)
 		return
 	}
@@ -370,7 +400,7 @@ func handlePlayerPositionsResponse(message []byte) {
 		if ownPlayerData != nil {
 			joinedPlayers[joinPlayerID] = ownPlayerData
 		}
-		for id, player := range receivedPlayers {
+		for id, player := range response.Players {
 			if id != joinPlayerID {
 				joinedPlayers[id] = make(map[string]rl.Rectangle)
 				for key, rect := range player {
@@ -381,7 +411,7 @@ func handlePlayerPositionsResponse(message []byte) {
 	} else {
 		// Client: replace all with server data
 		joinedPlayers = make(map[int]map[string]rl.Rectangle)
-		for id, player := range receivedPlayers {
+		for id, player := range response.Players {
 			joinedPlayers[id] = make(map[string]rl.Rectangle)
 			for key, rect := range player {
 				joinedPlayers[id][key] = rect
@@ -389,6 +419,28 @@ func handlePlayerPositionsResponse(message []byte) {
 		}
 	}
 	playersMutex.Unlock()
+}
+func handleMapDataResponse(message []byte) {
+	var response struct {
+		Type    string        `json:"type"`
+		Command string        `json:"command"`
+		Map     []interface{} `json:"map"` // or []string, []map[string]interface{}, etc.
+	}
+	err := json.Unmarshal(message, &response)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+	var stringMap []string
+	for _, item := range response.Map {
+		if str, ok := item.(string); ok {
+			stringMap = append(stringMap, str)
+		} else {
+			fmt.Printf("Warning: non-string item found: %v\n", item)
+		}
+	}
+
+	loadedMap = stringMap
 }
 
 func requestPlayerPositionsWS() {
@@ -438,6 +490,16 @@ func sendDataMovementWS(data MovementData) {
 	}
 	websocket_client.WriteMessage(websocket.TextMessage, jsonData)
 }
+func requestMapDataWS() {
+	mapRequest := make(map[string]string)
+	mapRequest["command"] = "get_map"
+
+	jsonData, err := json.Marshal(mapRequest)
+	if err != nil {
+		panic(err)
+	}
+	websocket_client.WriteMessage(websocket.TextMessage, jsonData)
+}
 
 func startServer(port string) {
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -476,6 +538,8 @@ func startServer(port string) {
 				playerID = handlePlayerRespawn(data, conn)
 			case "get_players":
 				handleGetPlayersWS(data, conn)
+			case "get_map":
+				handleGetMapWS(data, conn)
 			default:
 				log.Printf("Unknown command: %s", data["command"])
 			}
@@ -595,10 +659,31 @@ func handleGetPlayersWS(data map[string]string, conn *websocket.Conn) {
 	}
 	playersMutex.RUnlock()
 
-	jsonData, err := json.Marshal(playerList)
+	// Wrap the player data in a response structure with type
+	response := map[string]interface{}{
+		"type":    "player_positions",
+		"players": playerList,
+	}
+
+	jsonData, err := json.Marshal(response)
 	if err != nil {
 		log.Println("Error marshaling player positions:", err)
 		return
+	}
+
+	conn.WriteMessage(websocket.TextMessage, jsonData)
+}
+func handleGetMapWS(data map[string]string, conn *websocket.Conn) {
+	data["type"] = "map_data"
+	response := map[string]interface{}{
+		"command": data["command"],
+		"type":    data["type"],
+		"map":     loadedMap,
+	}
+	jsonData, err := json.Marshal(response)
+	//fmt.Println(data)
+	if err != nil {
+		panic(err)
 	}
 	conn.WriteMessage(websocket.TextMessage, jsonData)
 }
@@ -636,29 +721,6 @@ func init() {
 		rl.NewVector2(float32(screenWidth/2), float32(screenHeight/2)),
 		rl.NewVector2(float32(playerDest.X-(playerDest.Width/2)), float32(playerDest.Y-(playerDest.Height/2))),
 		0.0, 1.5)
-
-	loadMap(map_file)
-}
-
-func quit() {
-	if websocket_client != nil {
-		websocket_client.Close()
-	}
-	rl.UnloadTexture(grassSprite)
-	rl.UnloadTexture(fenceSprite)
-	rl.UnloadTexture(hillSprite)
-	rl.UnloadTexture(waterSprite)
-	rl.UnloadTexture(woodHouseWallsSprite)
-	rl.UnloadTexture(woodHouseRoofSprite)
-	rl.UnloadTexture(tilledSprite)
-	rl.UnloadTexture(doorSprite)
-	rl.UnloadTexture(playerSprite)
-	rl.UnloadMusicStream(music)
-	rl.CloseAudioDevice()
-	rl.CloseWindow()
-}
-
-func main() {
 	start_args := os.Args
 	if len(start_args) < 2 {
 		fmt.Println("Usage: program <host|join> [port|server_url]")
@@ -670,7 +732,6 @@ func main() {
 		fmt.Println("Mode must be 'host' or 'join'")
 		os.Exit(1)
 	}
-
 	if host_type == "join" {
 		if len(start_args) < 3 {
 			fmt.Println("Please provide server URL for join mode")
@@ -712,6 +773,29 @@ func main() {
 		// Wait for player ID assignment
 		time.Sleep(100 * time.Millisecond)
 	}
+
+	loadMap()
+}
+
+func quit() {
+	if websocket_client != nil {
+		websocket_client.Close()
+	}
+	rl.UnloadTexture(grassSprite)
+	rl.UnloadTexture(fenceSprite)
+	rl.UnloadTexture(hillSprite)
+	rl.UnloadTexture(waterSprite)
+	rl.UnloadTexture(woodHouseWallsSprite)
+	rl.UnloadTexture(woodHouseRoofSprite)
+	rl.UnloadTexture(tilledSprite)
+	rl.UnloadTexture(doorSprite)
+	rl.UnloadTexture(playerSprite)
+	rl.UnloadMusicStream(music)
+	rl.CloseAudioDevice()
+	rl.CloseWindow()
+}
+
+func main() {
 
 	rl.SetWindowTitle("Simple Game: " + host_type)
 	lastPlayerUpdate = time.Now()

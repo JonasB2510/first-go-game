@@ -72,6 +72,23 @@
       background: #e9ecef;
       border-radius: 5px;
     }
+    .map-section {
+      margin-top: 20px;
+      padding: 15px;
+      background: #f8f9fa;
+      border-radius: 5px;
+    }
+    .map-info {
+      display: flex;
+      gap: 20px;
+      margin-bottom: 15px;
+      align-items: center;
+    }
+    .map-canvas {
+      border: 2px solid #333;
+      background: #fff;
+      max-width: 100%;
+    }
   </style>
 </head>
 <body>
@@ -88,6 +105,7 @@
   <button id="disconnectBtn" onclick="disconnect()" disabled>Trennen</button>
   <button id="respawnBtn" onclick="respawn()" disabled>Respawn</button>
   <button id="getPlayersBtn" onclick="getPlayers()" disabled>Spieler abrufen</button>
+  <button id="getMapBtn" onclick="getMap()" disabled>Karte laden</button>
 
   <div class="controls">
     <div class="movement-grid">
@@ -109,12 +127,34 @@
     <p><strong>Ablauf:</strong> URL eingeben → "Verbinden" → dann "Respawn" → dann Bewegung möglich</p>
   </div>
 
+  <div class="map-section" id="mapSection" style="display: none;">
+    <div class="map-info">
+      <h3 style="margin: 0;">Karte:</h3>
+      <div>
+        <span id="mapDimensions">Größe: Unbekannt</span>
+        <button onclick="getMap()" style="margin-left: 10px;">Karte aktualisieren</button>
+      </div>
+    </div>
+    <canvas id="mapCanvas" class="map-canvas" width="800" height="600"></canvas>
+    <div id="mapLegend" style="margin-top: 10px; font-size: 12px; color: #666;">
+      <strong>Legende:</strong>
+      <span style="color: #4CAF50;">■ Gras</span>
+      <span style="color: #8B4513;">■ Zaun</span>
+      <span style="color: #A0522D;">■ Hügel</span>
+      <span style="color: #4169E1;">■ Wasser</span>
+      <span style="color: #D2691E;">■ Hauswände</span>
+      <span style="color: #CD853F;">■ Dach</span>
+      <span style="color: #8B4513;">■ Acker</span>
+      <span style="color: #654321;">■ Tür</span>
+    </div>
+  </div>
+
   <div id="playersInfo" style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 5px; display: none;">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
       <h3 style="margin: 0;">Aktuelle Spieler:</h3>
       <div>
         <label>
-          <input type="checkbox" id="autoUpdateToggle" checked> Auto-Update (1s)
+          <input type="checkbox" id="autoUpdateToggle" checked> Auto-Update (50ms)
         </label>
         <span id="updateStatus" style="margin-left: 10px; font-size: 12px; color: #666;"></span>
       </div>
@@ -126,8 +166,11 @@
   <script>
     let ws = null;
     let isConnected = false;
-    let isSpawned = false; // Tracks if player has successfully spawned
-    let autoUpdateInterval = null; // Auto-update timer
+    let isSpawned = false;
+    let autoUpdateInterval = null;
+    let mapData = null;
+    let mapWidth = 0;
+    let mapHeight = 0;
 
     // UI Elemente
     const statusDiv = document.getElementById('status');
@@ -135,15 +178,133 @@
     const disconnectBtn = document.getElementById('disconnectBtn');
     const respawnBtn = document.getElementById('respawnBtn');
     const getPlayersBtn = document.getElementById('getPlayersBtn');
+    const getMapBtn = document.getElementById('getMapBtn');
     const wsUrlInput = document.getElementById('wsUrl');
     const playersInfo = document.getElementById('playersInfo');
     const playersList = document.getElementById('playersList');
     const gameGrid = document.getElementById('gameGrid');
     const autoUpdateToggle = document.getElementById('autoUpdateToggle');
     const updateStatus = document.getElementById('updateStatus');
+    const mapSection = document.getElementById('mapSection');
+    const mapCanvas = document.getElementById('mapCanvas');
+    const mapDimensions = document.getElementById('mapDimensions');
     const movementButtons = ['upBtn', 'leftBtn', 'downBtn', 'rightBtn'];
 
-    // Get Players - MOVED OUTSIDE updateUI()
+    // Map colors for different tile types
+    const tileColors = {
+      'g': '#4CAF50',   // Gras - grün
+      'f': '#8B4513',   // Zaun - braun
+      'h': '#A0522D',   // Hügel - sienna
+      'w': '#4169E1',   // Wasser - blau
+      'ww': '#D2691E',  // Hauswände - orange
+      'wr': '#CD853F',  // Dach - peru
+      't': '#8B4513',   // Acker - braun
+      'd': '#654321'    // Tür - dunkelbraun
+    };
+
+    // Get Map function
+    function getMap() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        console.log("Nicht verbunden - kann keine Kartendaten abrufen");
+        return;
+      }
+
+      console.log("Sende get_map-Anfrage");
+      ws.send(JSON.stringify({ command: "get_map" }));
+    }
+
+    // Handle map data response
+    function handleMapData(mapResponse) {
+      console.log("Kartendaten erhalten:", mapResponse);
+      
+      if (!mapResponse.map || !Array.isArray(mapResponse.map)) {
+        console.error("Ungültige Kartendaten");
+        return;
+      }
+
+      const rawMap = mapResponse.map;
+      
+      // Parse map data - first two elements are width and height
+      if (rawMap.length < 2) {
+        console.error("Kartendaten zu kurz");
+        return;
+      }
+
+      mapWidth = parseInt(rawMap[0]);
+      mapHeight = parseInt(rawMap[1]);
+      
+      if (isNaN(mapWidth) || isNaN(mapHeight)) {
+        console.error("Ungültige Kartenabmessungen");
+        return;
+      }
+
+      // Extract tile map (numeric values) and source map (string values)
+      const expectedTiles = mapWidth * mapHeight;
+      const tileMap = [];
+      const srcMap = [];
+      
+      for (let i = 2; i < rawMap.length; i++) {
+        if (tileMap.length < expectedTiles) {
+          const tileValue = parseInt(rawMap[i]);
+          if (!isNaN(tileValue)) {
+            tileMap.push(tileValue);
+          }
+        } else {
+          srcMap.push(rawMap[i]);
+        }
+      }
+
+      mapData = {
+        width: mapWidth,
+        height: mapHeight,
+        tileMap: tileMap,
+        srcMap: srcMap
+      };
+
+      // Update UI
+      mapDimensions.textContent = `Größe: ${mapWidth} × ${mapHeight} (${tileMap.length} Tiles)`;
+      mapSection.style.display = 'block';
+      
+      // Draw the map
+      drawMap();
+    }
+
+    // Draw map on canvas
+    function drawMap() {
+      if (!mapData) return;
+
+      const canvas = mapCanvas;
+      const ctx = canvas.getContext('2d');
+      
+      // Clear canvas
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Calculate tile size to fit map in canvas
+      const tileWidth = canvas.width / mapData.width;
+      const tileHeight = canvas.height / mapData.height;
+      
+      // Draw each tile
+      for (let i = 0; i < mapData.tileMap.length; i++) {
+        const tileValue = mapData.tileMap[i];
+        const srcValue = mapData.srcMap[i] || 'g'; // Default to grass
+        
+        if (tileValue !== 0) {
+          const x = (i % mapData.width) * tileWidth;
+          const y = Math.floor(i / mapData.width) * tileHeight;
+          
+          // Set color based on tile type
+          ctx.fillStyle = tileColors[srcValue] || '#888888';
+          ctx.fillRect(x, y, tileWidth, tileHeight);
+          
+          // Add border for visibility
+          ctx.strokeStyle = '#000000';
+          ctx.lineWidth = 0.5;
+          ctx.strokeRect(x, y, tileWidth, tileHeight);
+        }
+      }
+    }
+
+    // Get Players function
     function getPlayers() {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         console.log("Nicht verbunden - kann keine Spielerdaten abrufen");
@@ -165,7 +326,7 @@
     }
 
     function startAutoUpdate() {
-      if (autoUpdateInterval) return; // Already running
+      if (autoUpdateInterval) return;
       
       autoUpdateInterval = setInterval(() => {
         if (isConnected && autoUpdateToggle.checked) {
@@ -173,9 +334,8 @@
         } else {
           stopAutoUpdate();
         }
-      }, 50); // Update every second
+      }, 50);
       
-      // Initial load
       getPlayers();
       console.log("Auto-update gestartet");
     }
@@ -188,24 +348,20 @@
       }
     }
 
-    // Handle players data response - MOVED OUTSIDE updateUI()
+    // Handle players data response
     function handlePlayersData(playersData) {
       console.log("Spielerdaten erhalten:", playersData);
       
-      // Clear previous grid content
       gameGrid.innerHTML = '';
       playersList.innerHTML = '';
       
-      // Check if we have player data
       const playerCount = Object.keys(playersData).length;
       if (playerCount === 0) {
         gameGrid.innerHTML = '<div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 18px; color: #666;">Keine Spieler online</div>';
         playersList.innerHTML = '<p>Keine Spieler online</p>';
       } else {
-        // Draw players on grid
         drawPlayersOnGrid(playersData);
         
-        // Create table for detailed info
         let tableHTML = `
           <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
             <thead>
@@ -219,7 +375,6 @@
             <tbody>
         `;
         
-        // Add each player to the table
         for (const [playerId, playerInfo] of Object.entries(playersData)) {
           const dest = playerInfo.playerDest;
           const src = playerInfo.playerSrc;
@@ -245,7 +400,6 @@
         playersList.innerHTML = tableHTML;
       }
       
-      // Show the players info section
       playersInfo.style.display = 'block';
     }
 
@@ -254,24 +408,21 @@
       const gridWidth = 800;
       const gridHeight = 600;
       
-      // Generate colors for different players
       const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#ffeaa7', '#dda0dd', '#98d8c8', '#f7dc6f'];
       let colorIndex = 0;
       
       for (const [playerId, playerInfo] of Object.entries(playersData)) {
         const dest = playerInfo.playerDest;
         
-        // Scale player position to fit our grid (assuming game world is larger)
-        // You may need to adjust these scaling factors based on your game's coordinate system
-        const scaleX = gridWidth / 1000; // Adjust 1000 to your game world width
-        const scaleY = gridHeight / 1000; // Adjust 1000 to your game world height
+        const scaleX = gridWidth / 1000;
+        const scaleY = gridHeight / 1000;
         
         const playerElement = document.createElement('div');
         playerElement.style.position = 'absolute';
         playerElement.style.left = (dest.X * scaleX) + 'px';
         playerElement.style.top = (dest.Y * scaleY) + 'px';
-        playerElement.style.width = Math.max(dest.Width * scaleX, 10) + 'px'; // Minimum 10px width
-        playerElement.style.height = Math.max(dest.Height * scaleY, 10) + 'px'; // Minimum 10px height
+        playerElement.style.width = Math.max(dest.Width * scaleX, 10) + 'px';
+        playerElement.style.height = Math.max(dest.Height * scaleY, 10) + 'px';
         playerElement.style.backgroundColor = colors[colorIndex % colors.length];
         playerElement.style.border = '2px solid #333';
         playerElement.style.borderRadius = '3px';
@@ -285,28 +436,23 @@
         playerElement.style.overflow = 'hidden';
         playerElement.style.transition = 'all 0.2s ease';
         
-        // Add player ID as text (shortened)
         const shortId = playerId.length > 8 ? playerId.substring(0, 8) + '...' : playerId;
         playerElement.textContent = shortId;
         
-        // Add tooltip with full info
         playerElement.title = `Player: ${playerId}\nPosition: ${dest.X}, ${dest.Y}\nSize: ${dest.Width}×${dest.Height}`;
         
         gameGrid.appendChild(playerElement);
         colorIndex++;
       }
       
-      // Add grid lines for better visualization
       addGridLines();
     }
 
-    // Add grid lines to help visualize the space
     function addGridLines() {
       const gridWidth = 800;
       const gridHeight = 600;
-      const gridSize = 50; // Grid cell size
+      const gridSize = 50;
       
-      // Vertical lines
       for (let x = 0; x <= gridWidth; x += gridSize) {
         const line = document.createElement('div');
         line.style.position = 'absolute';
@@ -319,7 +465,6 @@
         gameGrid.appendChild(line);
       }
       
-      // Horizontal lines
       for (let y = 0; y <= gridHeight; y += gridSize) {
         const line = document.createElement('div');
         line.style.position = 'absolute';
@@ -348,14 +493,13 @@
         disconnectBtn.disabled = false;
         respawnBtn.disabled = false;
         getPlayersBtn.disabled = false;
-        wsUrlInput.disabled = true; // URL-Eingabe während Verbindung deaktivieren
+        getMapBtn.disabled = false;
+        wsUrlInput.disabled = true;
         
-        // Start auto-update if enabled
         if (autoUpdateToggle.checked) {
           startAutoUpdate();
         }
         
-        // Bewegungsbuttons nur aktivieren wenn gespawned
         movementButtons.forEach(btnId => {
           document.getElementById(btnId).disabled = !isSpawned;
         });
@@ -366,12 +510,11 @@
         disconnectBtn.disabled = true;
         respawnBtn.disabled = true;
         getPlayersBtn.disabled = true;
-        wsUrlInput.disabled = false; // URL-Eingabe wieder aktivieren
+        getMapBtn.disabled = true;
+        wsUrlInput.disabled = false;
         
-        // Stop auto-update
         stopAutoUpdate();
         
-        // Alle Bewegungsbuttons deaktivieren
         movementButtons.forEach(btnId => {
           document.getElementById(btnId).disabled = true;
         });
@@ -391,7 +534,6 @@
         return;
       }
 
-      // Validierung der URL
       try {
         new URL(wsUrl);
         if (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://')) {
@@ -407,7 +549,7 @@
       ws.onopen = () => {
         console.log("WebSocket verbunden");
         isConnected = true;
-        isSpawned = false; // Reset spawn status on new connection
+        isSpawned = false;
         updateUI();
       };
 
@@ -416,24 +558,24 @@
         try {
           const data = JSON.parse(event.data);
           
-          // Check if it's a successful spawn response
-          if (typeof data == "number") {
+          // Handle different response types
+          if (data.type === "player_positions") {
+            handlePlayersData(data.players);
+          } else if (data.type === "map_data") {
+            handleMapData(data);
+          } else if (typeof data == "number") {
             isSpawned = true;
             console.log("Erfolgreich gespawned");
             updateUI();
-          }
-          // Handle other possible responses
-          else if (data === false || data === "false") {
+          } else if (data === false || data === "false") {
             console.log("Spawn fehlgeschlagen");
             isSpawned = false;
             updateUI();
-          }
-          // Handle get_players response
-          else if (typeof data === 'object' && data !== null) {
+          } else if (typeof data === 'object' && data !== null && !data.type) {
+            // Legacy player data without type field
             handlePlayersData(data);
           }
         } catch (e) {
-          // Handle non-JSON messages
           const message = event.data.toString().toLowerCase();
           if (message === "true") {
             isSpawned = true;
@@ -453,7 +595,7 @@
         console.log("WebSocket getrennt");
         isConnected = false;
         isSpawned = false;
-        stopAutoUpdate(); // Stop auto-update on disconnect
+        stopAutoUpdate();
         updateUI();
       };
 
@@ -461,7 +603,7 @@
         console.error("WebSocket Fehler:", error);
         isConnected = false;
         isSpawned = false;
-        stopAutoUpdate(); // Stop auto-update on error
+        stopAutoUpdate();
         updateUI();
       };
     }
@@ -473,7 +615,7 @@
         ws = null;
         isConnected = false;
         isSpawned = false;
-        stopAutoUpdate(); // Stop auto-update on manual disconnect
+        stopAutoUpdate();
         updateUI();
       }
     }
@@ -509,7 +651,6 @@
         playerRight: "false"
       };
 
-      // Nur eine Richtung auf "true" setzen
       moveData["player" + direction] = "true";
 
       console.log("Sende Bewegung:", JSON.stringify(moveData));
@@ -518,7 +659,6 @@
 
     // WASD Tastatur-Steuerung
     document.addEventListener('keydown', (event) => {
-      // Nur wenn Bewegung möglich ist
       if (!isConnected || !isSpawned) return;
 
       switch(event.key.toLowerCase()) {
