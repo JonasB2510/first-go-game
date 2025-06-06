@@ -97,6 +97,11 @@
   <div class="connection-settings">
     <label for="wsUrl">WebSocket URL:</label>
     <input type="text" id="wsUrl" value="ws://localhost:8080/ws" placeholder="ws://localhost:8080/ws" style="width: 300px; padding: 8px; margin: 5px;">
+    <script>
+      const wsUrl = document.getElementById('wsUrl');
+      wsUrl.value = `ws://${window.location.host}/ws`;
+      wsUrl.placeholder = `ws://${window.location.host}/ws`;
+    </script>
   </div>
 
   <div id="status" class="status disconnected">Nicht verbunden</div>
