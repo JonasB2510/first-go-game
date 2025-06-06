@@ -71,11 +71,12 @@ var (
 	websocket_client *websocket.Conn
 
 	// Multiplayer
-	playersMutex     sync.RWMutex
-	joinedPlayers    = make(map[int]map[string]rl.Rectangle)
-	joinPlayerID     int
-	lastPlayerUpdate time.Time
-	lastMapUpdate    time.Time
+	playersMutex      sync.RWMutex
+	joinedPlayers     = make(map[int]map[string]rl.Rectangle)
+	joinPlayerID      int
+	lastPlayerUpdate  time.Time
+	lastMapUpdate     time.Time
+	mapUpdateCooldown = 1000
 )
 
 type MovementData struct {
@@ -185,6 +186,11 @@ func input() {
 func update() {
 	running = !rl.WindowShouldClose()
 
+	if time.Since(lastMapUpdate) > time.Duration(mapUpdateCooldown)*time.Millisecond {
+		loadMap()
+		lastMapUpdate = time.Now()
+	}
+
 	// Update player animation
 	if playerFrame > (maxFrames - 1) {
 		playerFrame = 0
@@ -235,13 +241,14 @@ func update() {
 	requestPlayerPositionsWS()
 	//	lastPlayerUpdate = time.Now()
 	//}
-	if time.Since(lastMapUpdate) > 10000*time.Millisecond {
-		requestMapDataWS()
-		time.Sleep(1 * time.Second)
-		loadMap()
-		lastMapUpdate = time.Now()
+	if host_type == "join" {
+		if time.Since(lastMapUpdate) > time.Duration(mapUpdateCooldown)*time.Millisecond {
+			requestMapDataWS()
+			time.Sleep(1 * time.Second)
+			loadMap()
+			lastMapUpdate = time.Now()
+		}
 	}
-
 	frameCount++
 	playerSrc.Y = playerSrc.Height
 	if !playerMoving && playerFrame > 1 {
