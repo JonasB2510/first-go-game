@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Game Gateway</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .server { border: 1px solid #ccc; margin: 10px 0; padding: 15px; border-radius: 5px; }
+        .server.full { background-color: #ffe6e6; }
+        .server.empty { background-color: #e6ffe6; }
+        .server-header { font-weight: bold; font-size: 18px; margin-bottom: 10px; }
+        .server-info { color: #666; }
+        button { padding: 8px 15px; margin: 5px; cursor: pointer; }
+        .refresh-btn { background-color: #007bff; color: white; border: none; border-radius: 3px; }
+        .join-btn { background-color: #28a745; color: white; border: none; border-radius: 3px; }
+        .join-btn:disabled { background-color: #ccc; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+    <h1>Game Gateway - Available Servers</h1>
+    <button class="refresh-btn" onclick="refreshServers()">Refresh Server List</button>
+    <div id="server-list"></div>
+
+    <script>
+        let ws;
+        
+        function connectWebSocket() {
+            ws = new WebSocket('ws://localhost:' + window.location.port + '/ws');
+            
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                if (data.type === 'server_list') {
+                    displayServers(data.servers);
+                }
+            };
+            
+            ws.onopen = function() {
+                refreshServers();
+            };
+        }
+        
+        function refreshServers() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: "gateway_message",
+                    command: "get_server_list",
+                    data: {}
+                }));
+            }
+        }
+        
+        function displayServers(servers) {
+            const serverList = document.getElementById('server-list');
+            serverList.innerHTML = '';
+            
+            if (servers.length === 0) {
+                serverList.innerHTML = '<p>No servers available.</p>';
+                return;
+            }
+            
+            servers.forEach(server => {
+                const serverDiv = document.createElement('div');
+                const isFull = server.player_count >= server.max_players;
+                serverDiv.className = 'server ' + (isFull ? 'full' : (server.player_count === 0 ? 'empty' : ''));
+                
+                serverDiv.innerHTML = `
+                    <div class="server-header">\${server.id}</div>
+                    <div class="server-info">
+                        Address: \${server.address}:\${server.port}<br>
+                        Players: \${server.player_count}/\${server.max_players}<br>
+                        Game Mode: \${server.game_mode}<br>
+                        Status: \${server.active ? 'Active' : 'Inactive'}
+                    </div>
+                    <button class="join-btn" \${isFull || !server.active ? 'disabled' : ''} 
+                            onclick="joinServer('\${server.id}')">
+                        \${isFull ? 'Server Full' : 'Join Server'}
+                    </button>
+                `;
+                
+                serverList.appendChild(serverDiv);
+            });
+        }
+        
+        function joinServer(serverId) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: "gateway_message",
+                    command: "join_server",
+                    data: { server_id: serverId }
+                }));
+                
+                ws.onmessage = function(event) {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'join_server_response') {
+                        if (data.success) {
+                            alert('Connect to: ' + data.address + ':' + data.port);
+                        } else {
+                            alert('Failed to join server: ' + data.message);
+                        }
+                    }
+                };
+            }
+        }
+        
+        connectWebSocket();
+        
+        // Auto-refresh every 10 seconds
+        setInterval(refreshServers, 10000);
+    </script>
+</body>
+</html>

@@ -33,3 +33,5 @@ go.work.sum
 
 *.txt
 exe
+old_tcp/resource
+gateway_test/resource

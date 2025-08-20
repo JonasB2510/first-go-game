@@ -15,6 +15,7 @@ import (
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 	"github.com/gorilla/websocket"
+	"github.com/tawesoft/golib/v2/dialog"
 )
 
 const (
@@ -68,6 +69,7 @@ var (
 	// Networking
 	host_type        string
 	server_url_ws    string
+	gateway_server   string
 	websocket_client *websocket.Conn
 
 	// Multiplayer
@@ -730,12 +732,12 @@ func init() {
 		0.0, 1.5)
 	start_args := os.Args
 	if len(start_args) < 2 {
-		fmt.Println("Usage: program <host|join> [port|server_url]")
+		fmt.Println("Usage: program <host|join|gateway> [port|server_url]")
 		os.Exit(1)
 	}
 
 	host_type = start_args[1]
-	if host_type != "host" && host_type != "join" {
+	if host_type != "host" && host_type != "join" && host_type != "gateway" {
 		fmt.Println("Mode must be 'host' or 'join'")
 		os.Exit(1)
 	}
@@ -753,6 +755,14 @@ func init() {
 
 		data := RespawnData{Respawn: true}
 		sendDataRespawnWS(data)
+	}
+	if host_type == "gateway" {
+		if len(start_args) < 3 {
+			fmt.Println("Please provide port for host mode")
+			os.Exit(1)
+		}
+		gateway_server = start_args[2]
+		dialog.Alert("to be implemented")
 	}
 
 	if host_type == "host" {

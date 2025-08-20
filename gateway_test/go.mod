@@ -1,9 +1,9 @@
-module main
+module jonasb2510/gateway_test
 
 go 1.24.1
 
 require (
-	github.com/gen2brain/raylib-go/raylib v0.0.0-20250521210303-fca3bf26c568
+	github.com/gen2brain/raylib-go/raylib v0.55.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/tawesoft/golib/v2 v2.16.0
 )
