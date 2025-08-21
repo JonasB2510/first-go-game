@@ -2,7 +2,7 @@
 
 # launcher: https://github.com/JonasB2510/first-go-game-launcher
 
-# [Credits](credits.md)
+# [Credits](CREDITS.md)
 
 # assets from:
 # https://cupnooble.itch.io/sprout-lands-asset-pack
