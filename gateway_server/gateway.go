@@ -366,9 +366,9 @@ func joinHandler(w http.ResponseWriter, r *http.Request) {
 				if err := lobby.Host.WriteMessage(websocket.TextMessage, msg); err != nil {
 					log.Printf("Error forwarding message to host: %v", err)
 				} else {
-					if command != "get_players" {
-						fmt.Printf("Forwarded command %s from player %s to host\n", command, playerID)
-					}
+					//if command != "get_players" {
+					//	fmt.Printf("Forwarded command %s from player %s to host\n", command, playerID)
+					//}
 				}
 			} else {
 				log.Printf("Host not found for lobby %s", playerLobbyID)
