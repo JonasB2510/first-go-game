@@ -35,3 +35,4 @@ go.work.sum
 exe
 old_tcp/resource
 gateway_test/resource
+gateway_test_v2/resource
