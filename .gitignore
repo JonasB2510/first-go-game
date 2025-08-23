@@ -33,6 +33,7 @@ go.work.sum
 
 *.txt
 exe
-old_tcp/resource
-gateway_test/resource
-gateway_test_v2/resource
+old tests/gateway_test_old/resource
+old tests/connection test/resource
+old tests/old_tcp/resource
+old tests/old_without_gateway/resource

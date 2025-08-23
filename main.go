@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
@@ -67,26 +66,29 @@ var (
 	cam rl.Camera2D
 
 	// Networking
-	host_type        string
-	server_url_ws    string
-	gateway_server   string
-	websocket_client *websocket.Conn
+	host_type           string
+	server_url_ws       string
+	gateway_server      string
+	gateway_invite_code string
+	websocket_client    *websocket.Conn
+	websocket_gateway   *websocket.Conn
 
 	// Multiplayer
 	playersMutex      sync.RWMutex
-	joinedPlayers     = make(map[int]map[string]rl.Rectangle)
-	joinPlayerID      int
+	joinedPlayers     = make(map[string]map[string]rl.Rectangle)
+	joinPlayerID_old  int
+	joinPlayerID      string
 	lastPlayerUpdate  time.Time
 	lastMapUpdate     time.Time
 	mapUpdateCooldown = 1000
 )
 
 type MovementData struct {
-	PlayerID    int  `json:"playerid"`
-	PlayerUp    bool `json:"playerUp"`
-	PlayerLeft  bool `json:"playerLeft"`
-	PlayerDown  bool `json:"playerDown"`
-	PlayerRight bool `json:"playerRight"`
+	PlayerID    string `json:"playerid"`
+	PlayerUp    bool   `json:"playerUp"`
+	PlayerLeft  bool   `json:"playerLeft"`
+	PlayerDown  bool   `json:"playerDown"`
+	PlayerRight bool   `json:"playerRight"`
 }
 
 type RespawnData struct {
@@ -215,12 +217,12 @@ func update() {
 		}
 
 		// Update local player in server's map if host
-		if host_type == "host" {
+		if host_type == "host" || host_type == "gateway" {
 			updateLocalPlayerOnServer()
 		}
 
 		// Send movement data via WebSocket
-		if host_type == "join" || host_type == "host" {
+		if host_type == "join" || host_type == "host" || host_type == "gateway" || host_type == "gatewayjoin" {
 			data := MovementData{
 				PlayerID:    joinPlayerID,
 				PlayerUp:    playerUp,
@@ -243,7 +245,7 @@ func update() {
 	requestPlayerPositionsWS()
 	//	lastPlayerUpdate = time.Now()
 	//}
-	if host_type == "join" {
+	if host_type == "join" || host_type == "gatewayjoin" {
 		if time.Since(lastMapUpdate) > time.Duration(mapUpdateCooldown)*time.Millisecond {
 			requestMapDataWS()
 			time.Sleep(1 * time.Second)
@@ -296,7 +298,7 @@ func loadMap() {
 	tileMap = tileMap[:0]
 	srcMap = srcMap[:0]
 
-	if host_type == "host" {
+	if host_type == "host" || host_type == "gateway" {
 		file, err := os.ReadFile(map_file)
 		if err != nil {
 			fmt.Println(err)
@@ -304,7 +306,7 @@ func loadMap() {
 		}
 		remNewLines := strings.Replace(string(file), "\n", " ", -1)
 		loadedMap = strings.Fields(remNewLines)
-	} else if host_type == "join" {
+	} else if host_type == "join" || host_type == "gatewayjoin" {
 		requestMapDataWS()
 		//fmt.Println(loadedMap)
 	}
@@ -338,17 +340,31 @@ func loadMap() {
 	}
 }
 
-func clientWebsocketConnect(websocket_url string) {
-	u := url.URL{Scheme: "ws", Host: websocket_url, Path: "/ws"}
+func clientWebsocketConnect(websocket_url string, path string, invite_code string) {
+	u := url.URL{Scheme: "ws", Host: websocket_url, Path: path}
 	log.Printf("Connecting to %s", u.String())
 	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
 		log.Fatal("Dial error:", err)
 	}
 	websocket_client = c
+	if path == "/join" {
+		dialog.Alert("test")
+		response_data := make(map[string]string)
+		response_data["command"] = "registerPlayer"
+		response_data["invite_code"] = invite_code
+		msg, err := json.Marshal(response_data)
+		if err != nil {
+			log.Printf("Error marshalling response: %v", err)
+		}
+		websocket_client.WriteMessage(websocket.TextMessage, msg)
+	}
 
 	// Start goroutine to handle incoming messages
 	go handleWebSocketMessages()
+}
+func text(msg ...interface{}) string {
+	return fmt.Sprintf("%+v", msg...)
 }
 
 func handleWebSocketMessages() {
@@ -370,6 +386,8 @@ func handleWebSocketMessages() {
 					handlePlayerPositionsResponse(message)
 				case "map_data":
 					handleMapDataResponse(message)
+				case "player_id":
+					joinPlayerID = text(response["player_id"])
 				default:
 					log.Printf("Unknown JSON message type: %v", msgType)
 				}
@@ -383,8 +401,8 @@ func handleWebSocketMessages() {
 			if messageStr == "true" {
 				log.Println("Respawn confirmed")
 			} else if id, err := strconv.Atoi(messageStr); err == nil {
-				joinPlayerID = id
-				log.Printf("Assigned player ID: %d", joinPlayerID)
+				joinPlayerID_old = id
+				log.Printf("Assigned player ID: %d", joinPlayerID_old)
 			}
 		}
 	}
@@ -392,34 +410,38 @@ func handleWebSocketMessages() {
 
 func handlePlayerPositionsResponse(message []byte) {
 	var response struct {
-		Type    string                          `json:"type"`
-		Players map[int]map[string]rl.Rectangle `json:"players"`
+		Type    string                             `json:"type"`
+		Players map[string]map[string]rl.Rectangle `json:"players"`
 	}
-
 	if err := json.Unmarshal(message, &response); err != nil {
 		log.Println("Error parsing player positions:", err)
 		return
 	}
 
 	playersMutex.Lock()
-	if host_type == "host" {
+	if host_type == "host" || host_type == "gateway" {
 		// Keep own player data, update others
 		ownPlayerData := joinedPlayers[joinPlayerID]
-		joinedPlayers = make(map[int]map[string]rl.Rectangle)
-		if ownPlayerData != nil {
-			joinedPlayers[joinPlayerID] = ownPlayerData
-		}
+
+		// Only update other players, keep own data
 		for id, player := range response.Players {
 			if id != joinPlayerID {
-				joinedPlayers[id] = make(map[string]rl.Rectangle)
+				if joinedPlayers[id] == nil {
+					joinedPlayers[id] = make(map[string]rl.Rectangle)
+				}
 				for key, rect := range player {
 					joinedPlayers[id][key] = rect
 				}
 			}
 		}
+
+		// Restore own player data if it was lost
+		if ownPlayerData != nil && joinedPlayers[joinPlayerID] == nil {
+			joinedPlayers[joinPlayerID] = ownPlayerData
+		}
 	} else {
-		// Client: replace all with server data
-		joinedPlayers = make(map[int]map[string]rl.Rectangle)
+		// Client: replace all with server data (join and gatewayjoin modes)
+		joinedPlayers = make(map[string]map[string]rl.Rectangle)
 		for id, player := range response.Players {
 			joinedPlayers[id] = make(map[string]rl.Rectangle)
 			for key, rect := range player {
@@ -459,7 +481,8 @@ func requestPlayerPositionsWS() {
 
 	playerData := make(map[string]string)
 	playerData["command"] = "get_players"
-	playerData["exclude_id"] = strconv.Itoa(joinPlayerID)
+	playerData["exclude_id"] = joinPlayerID
+	playerData["player_id"] = joinPlayerID
 
 	jsonData, err := json.Marshal(playerData)
 	if err != nil {
@@ -510,6 +533,79 @@ func requestMapDataWS() {
 	websocket_client.WriteMessage(websocket.TextMessage, jsonData)
 }
 
+func startGatewayConnection(gateway_url string) {
+	u := url.URL{Scheme: "ws", Host: gateway_url, Path: "/host"}
+	log.Printf("Connecting to %s", u.String())
+	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	if err != nil {
+		log.Fatal("Dial error:", err)
+	}
+	websocket_gateway = c
+	data := map[string]string{
+		"command": "registerHost",
+	}
+
+	// Convert map to JSON
+	message, err := json.Marshal(data)
+	if err != nil {
+		log.Fatal("Error marshaling JSON:", err)
+	}
+
+	// Send JSON message
+	err = websocket_gateway.WriteMessage(websocket.TextMessage, message)
+	if err != nil {
+		log.Fatal("Error writing message:", err)
+	}
+
+	go gatewayConnectionHandler()
+
+}
+func gatewayConnectionHandler() {
+	for {
+		_, message, err := websocket_gateway.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("WebSocket error: %v", err)
+			} else {
+				log.Println("WebSocket connection closed")
+				quit()
+			}
+			break
+		}
+		defer websocket_gateway.Close()
+		var data map[string]string
+		err = json.Unmarshal(message, &data)
+		if err != nil {
+			log.Printf("JSON unmarshal error: %v", err)
+			continue
+		}
+
+		switch data["command"] {
+		case "player_data":
+			handlePlayerMovement(data, websocket_gateway)
+		case "respawn":
+			handlePlayerRespawn(data, websocket_gateway)
+		case "get_players":
+			handleGetPlayersWS(data, websocket_gateway)
+		case "get_map":
+			handleGetMapWS(data, websocket_gateway)
+		case "registerHostResponse":
+			fmt.Println("Lobby ID:", data["lobby_id"])
+			gateway_invite_code = data["lobby_id"]
+
+			// Now register the host as a player in the lobby
+			registerData := map[string]string{
+				"command":     "registerPlayer",
+				"invite_code": gateway_invite_code,
+			}
+			msg, _ := json.Marshal(registerData)
+			websocket_gateway.WriteMessage(websocket.TextMessage, msg)
+		default:
+			log.Printf("Unknown command: %s", data["command"])
+		}
+	}
+}
+
 func startServer(port string) {
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -520,7 +616,7 @@ func startServer(port string) {
 		defer conn.Close()
 
 		log.Println("WebSocket connection established")
-		var playerID int
+		var playerID string
 
 		for {
 			_, message, err := conn.ReadMessage()
@@ -542,7 +638,8 @@ func startServer(port string) {
 
 			switch data["command"] {
 			case "player_data":
-				handlePlayerMovement(data, playerID, conn)
+				data["player_id"] = playerID
+				handlePlayerMovement(data, conn)
 			case "respawn":
 				playerID = handlePlayerRespawn(data, conn)
 			case "get_players":
@@ -555,7 +652,7 @@ func startServer(port string) {
 		}
 
 		// Clean up player when disconnected
-		if playerID != 0 {
+		if playerID != "" {
 			playersMutex.Lock()
 			delete(joinedPlayers, playerID)
 			playersMutex.Unlock()
@@ -589,12 +686,18 @@ func startServer(port string) {
 	}
 }
 
-func handlePlayerMovement(data map[string]string, playerID int, conn *websocket.Conn) {
+func handlePlayerMovement(data map[string]string, conn *websocket.Conn) {
 	playersMutex.Lock()
 	defer playersMutex.Unlock()
+	var playerID string
+	playerID = data["player_id"]
+	//if err != nil {
+	//	println("Error in handle player movement: %v", err)
+	//}
 
 	if _, exists := joinedPlayers[playerID]; !exists {
 		log.Printf("Player %d not found for movement", playerID)
+		fmt.Println(joinedPlayers)
 		return
 	}
 
@@ -625,13 +728,26 @@ func handlePlayerMovement(data map[string]string, playerID int, conn *websocket.
 	joinedPlayers[playerID]["playerDest"] = currentRect
 	joinedPlayers[playerID]["playerSrc"] = currentRectSrc
 
-	response := fmt.Sprintf("%.0f,%.0f", currentRect.X, currentRect.Y)
-	conn.WriteMessage(websocket.TextMessage, []byte(response))
+	response := make(map[string]string) //fmt.Sprintf("%.0f,%.0f", currentRect.X, currentRect.Y)
+	currentXstr := fmt.Sprintf("%f", currentRect.X)
+	response["currentX"] = currentXstr
+	currentYstr := fmt.Sprintf("%f", currentRect.Y)
+	response["currentY"] = currentYstr
+	response["player_id"] = playerID
+	msg, err := json.Marshal(response)
+	if err != nil {
+		println("Json marshal error:", err)
+	}
+	conn.WriteMessage(websocket.TextMessage, msg)
 }
 
-func handlePlayerRespawn(data map[string]string, conn *websocket.Conn) int {
+func handlePlayerRespawn(data map[string]string, conn *websocket.Conn) string {
 	if respawn, _ := strconv.ParseBool(data["respawn"]); respawn {
-		playerID := rand.IntN(1000000)
+		var playerID string
+		playerID = data["player_id"] //rand.IntN(1000000)
+		//if err != "" {
+		//	fmt.Printf("Error in respawn handler: %v", err)
+		//}
 
 		playersMutex.Lock()
 		joinedPlayers[playerID] = make(map[string]rl.Rectangle)
@@ -639,25 +755,25 @@ func handlePlayerRespawn(data map[string]string, conn *websocket.Conn) int {
 		joinedPlayers[playerID]["playerSrc"] = rl.NewRectangle(0, 0, 48, 48)
 		playersMutex.Unlock()
 
-		fmt.Printf("Player %d spawned. Total players: %d\n", playerID, len(joinedPlayers))
+		fmt.Printf("Player", playerID, "spawned. Total players:", len(joinedPlayers))
 
 		// Send the player ID back to the client
-		conn.WriteMessage(websocket.TextMessage, []byte(strconv.Itoa(playerID)))
+		//conn.WriteMessage(websocket.TextMessage, []byte(strconv.Itoa(playerID)))
 		return playerID
 	}
-	return -1
+	return ""
 }
 
 func handleGetPlayersWS(data map[string]string, conn *websocket.Conn) {
-	excludeID := 0
-	if excludeStr, exists := data["exclude_id"]; exists {
-		if id, err := strconv.Atoi(excludeStr); err == nil {
-			excludeID = id
-		}
+	excludeID := ""
+	if excludeStr, exists := data["player_id"]; exists {
+		id := excludeStr
+		excludeID = id
+
 	}
 
 	playersMutex.RLock()
-	playerList := make(map[int]map[string]rl.Rectangle)
+	playerList := make(map[string]map[string]rl.Rectangle)
 	for id, player := range joinedPlayers {
 		if id != excludeID {
 			playerList[id] = make(map[string]rl.Rectangle)
@@ -670,8 +786,9 @@ func handleGetPlayersWS(data map[string]string, conn *websocket.Conn) {
 
 	// Wrap the player data in a response structure with type
 	response := map[string]interface{}{
-		"type":    "player_positions",
-		"players": playerList,
+		"type":      "player_positions",
+		"players":   playerList,
+		"player_id": excludeID,
 	}
 
 	jsonData, err := json.Marshal(response)
@@ -685,9 +802,10 @@ func handleGetPlayersWS(data map[string]string, conn *websocket.Conn) {
 func handleGetMapWS(data map[string]string, conn *websocket.Conn) {
 	data["type"] = "map_data"
 	response := map[string]interface{}{
-		"command": data["command"],
-		"type":    data["type"],
-		"map":     loadedMap,
+		"command":   data["command"],
+		"type":      data["type"],
+		"map":       loadedMap,
+		"player_id": data["player_id"],
 	}
 	jsonData, err := json.Marshal(response)
 	//fmt.Println(data)
@@ -737,18 +855,34 @@ func init() {
 	}
 
 	host_type = start_args[1]
-	if host_type != "host" && host_type != "join" && host_type != "gateway" {
+	if host_type != "host" && host_type != "join" && host_type != "gateway" && host_type != "gatewayjoin" {
 		fmt.Println("Mode must be 'host' or 'join'")
 		os.Exit(1)
 	}
 	if host_type == "join" {
+		if len(start_args) < 2 {
+			fmt.Println("Please provide server URL for join mode")
+			os.Exit(1)
+		}
+		server_url_ws = start_args[2]
+
+		clientWebsocketConnect(server_url_ws, "/ws", "")
+
+		// Wait a moment for connection to establish
+		time.Sleep(100 * time.Millisecond)
+
+		data := RespawnData{Respawn: true}
+		sendDataRespawnWS(data)
+	}
+	if host_type == "gatewayjoin" {
 		if len(start_args) < 3 {
 			fmt.Println("Please provide server URL for join mode")
 			os.Exit(1)
 		}
 		server_url_ws = start_args[2]
 
-		clientWebsocketConnect(server_url_ws)
+		gateway_invite_code = os.Args[3]
+		clientWebsocketConnect(server_url_ws, "/join", gateway_invite_code)
 
 		// Wait a moment for connection to establish
 		time.Sleep(100 * time.Millisecond)
@@ -758,11 +892,24 @@ func init() {
 	}
 	if host_type == "gateway" {
 		if len(start_args) < 3 {
-			fmt.Println("Please provide port for host mode")
+			fmt.Println("Please provide gateway url and local server port")
 			os.Exit(1)
 		}
 		gateway_server = start_args[2]
-		dialog.Alert("to be implemented")
+		go startGatewayConnection(gateway_server)
+		//dialog.Alert("to be implemented")
+		time.Sleep(100 * time.Millisecond)
+
+		clientWebsocketConnect(gateway_server, "/join", gateway_invite_code)
+
+		// Wait for WebSocket connection
+		time.Sleep(100 * time.Millisecond)
+
+		data := RespawnData{Respawn: true}
+		sendDataRespawnWS(data)
+
+		// Wait for player ID assignment
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	if host_type == "host" {
@@ -779,7 +926,7 @@ func init() {
 		// Wait for server to start
 		time.Sleep(200 * time.Millisecond)
 
-		clientWebsocketConnect(server_url_ws)
+		clientWebsocketConnect(server_url_ws, "/ws", "")
 
 		// Wait for WebSocket connection
 		time.Sleep(100 * time.Millisecond)
