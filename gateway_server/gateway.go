@@ -293,7 +293,7 @@ func joinHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		command := getStringValue(data, "command")
+		command := data["command"]
 
 		switch command {
 		case "registerPlayer":

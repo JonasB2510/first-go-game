@@ -358,6 +358,9 @@ func clientWebsocketConnect(websocket_url string, path string, invite_code strin
 			log.Printf("Error marshalling response: %v", err)
 		}
 		websocket_client.WriteMessage(websocket.TextMessage, msg)
+		fmt.Println("trying to register player")
+	} else {
+		fmt.Println("path:", path)
 	}
 
 	// Start goroutine to handle incoming messages
@@ -382,12 +385,35 @@ func handleWebSocketMessages() {
 			// Check message type to handle different JSON responses
 			if msgType, exists := response["type"]; exists {
 				switch msgType {
+				case "player_id":
+					joinPlayerID = text(response["player_id"])
+					fmt.Println("registered player")
+					break
+				default:
+					log.Printf("Unknown JSON message type: %v", msgType)
+				}
+			}
+		}
+	}
+	for {
+		_, message, err := websocket_client.ReadMessage()
+		if err != nil {
+			log.Println("WebSocket read error:", err)
+			break
+		}
+
+		// Try to parse as JSON first
+		var response map[string]interface{}
+		if err := json.Unmarshal(message, &response); err == nil {
+			// Check message type to handle different JSON responses
+			if msgType, exists := response["type"]; exists {
+				switch msgType {
 				case "player_positions":
 					handlePlayerPositionsResponse(message)
 				case "map_data":
 					handleMapDataResponse(message)
-				case "player_id":
-					joinPlayerID = text(response["player_id"])
+				//case "player_id":
+				//	joinPlayerID = text(response["player_id"])
 				default:
 					log.Printf("Unknown JSON message type: %v", msgType)
 				}
@@ -581,14 +607,6 @@ func gatewayConnectionHandler() {
 		}
 
 		switch data["command"] {
-		case "player_data":
-			handlePlayerMovement(data, websocket_gateway)
-		case "respawn":
-			handlePlayerRespawn(data, websocket_gateway)
-		case "get_players":
-			handleGetPlayersWS(data, websocket_gateway)
-		case "get_map":
-			handleGetMapWS(data, websocket_gateway)
 		case "registerHostResponse":
 			fmt.Println("Lobby ID:", data["lobby_id"])
 			gateway_invite_code = data["lobby_id"]
@@ -600,6 +618,51 @@ func gatewayConnectionHandler() {
 			}
 			msg, _ := json.Marshal(registerData)
 			websocket_gateway.WriteMessage(websocket.TextMessage, msg)
+			fmt.Println("registered host")
+			break
+		default:
+			log.Printf("Unknown command: %s", data["command"])
+		}
+	}
+	for {
+		_, message, err := websocket_gateway.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("WebSocket error: %v", err)
+			} else {
+				log.Println("WebSocket connection closed")
+				quit()
+			}
+			break
+		}
+		defer websocket_gateway.Close()
+		var data map[string]string
+		err = json.Unmarshal(message, &data)
+		if err != nil {
+			log.Printf("JSON unmarshal error: %v", err)
+			continue
+		}
+
+		switch data["command"] {
+		case "player_data":
+			handlePlayerMovement(data, websocket_gateway)
+		case "respawn":
+			handlePlayerRespawn(data, websocket_gateway)
+		case "get_players":
+			handleGetPlayersWS(data, websocket_gateway)
+		case "get_map":
+			handleGetMapWS(data, websocket_gateway)
+		//case "registerHostResponse":
+		//	fmt.Println("Lobby ID:", data["lobby_id"])
+		//	gateway_invite_code = data["lobby_id"]
+		//
+		//	// Now register the host as a player in the lobby
+		//	registerData := map[string]string{
+		//		"command":     "registerPlayer",
+		//		"invite_code": gateway_invite_code,
+		//	}
+		//	msg, _ := json.Marshal(registerData)
+		//	websocket_gateway.WriteMessage(websocket.TextMessage, msg)
 		default:
 			log.Printf("Unknown command: %s", data["command"])
 		}
