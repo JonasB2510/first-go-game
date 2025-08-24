@@ -344,7 +344,7 @@ func joinHandler(w http.ResponseWriter, r *http.Request) {
 
 		default:
 			if playerID == "" || playerLobbyID == "" {
-				log.Printf("Message received before player registration: %s", string(message))
+				//log.Printf("Message received before player registration: %s", string(message))
 				continue
 			}
 
